@@ -3,7 +3,11 @@
 
 import unittest
 
+import contextlib
+import io
+
 from lambda_function import (
+    delete_computers_from_protect,
     extract_serial_numbers_from_pro,
     find_computers_to_delete,
     normalize_protect_computers,
@@ -62,6 +66,50 @@ class FindComputersToDeleteTests(unittest.TestCase):
         pro_serials = {"AAA"}
         protect = {"AAA": {"serial": "AAA", "uuid": "u1"}}
         self.assertEqual(find_computers_to_delete(pro_serials, protect), [])
+
+
+class DeletionLoggingTests(unittest.TestCase):
+    """Every deleted serial must appear in the log so a run can be audited afterwards."""
+
+    def run_deletions(self, computers, failing_uuids=(), graphql_error_uuids=()):
+        def api_call(instance, token, query, variables):
+            if variables["uuid"] in failing_uuids:
+                raise RuntimeError("delete refused")
+            if variables["uuid"] in graphql_error_uuids:
+                return {"data": {"deleteComputer": None}, "errors": [{"message": "not authorized"}]}
+            return {"data": {"deleteComputer": {"hostName": "student-host"}}}
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            counts = delete_computers_from_protect("inst", "tok", computers, api_call=api_call)
+        return counts, out.getvalue()
+
+    def test_logs_every_deleted_serial_past_ten(self):
+        computers = [{"serial": f"SER{i:03d}", "uuid": f"u{i}", "hostName": f"host{i}"} for i in range(1, 26)]
+        counts, log = self.run_deletions(computers)
+        self.assertEqual(counts, (25, 0))
+        for c in computers:
+            self.assertIn(f"Deleted serial {c['serial']}", log)
+
+    def test_never_logs_hostnames(self):
+        computers = [{"serial": "AAA", "uuid": "u1", "hostName": "host-with-a-name"}]
+        _, log = self.run_deletions(computers)
+        self.assertNotIn("host-with-a-name", log)
+        self.assertNotIn("student-host", log)
+
+    def test_logs_failed_serial(self):
+        computers = [{"serial": "AAA", "uuid": "u1", "hostName": "h1"}, {"serial": "BBB", "uuid": "u2", "hostName": "h2"}]
+        counts, log = self.run_deletions(computers, failing_uuids={"u2"})
+        self.assertEqual(counts, (1, 1))
+        self.assertIn("Failed to delete serial BBB", log)
+        self.assertNotIn("h2", log)
+
+    def test_graphql_error_response_counts_as_failure(self):
+        computers = [{"serial": "AAA", "uuid": "u1", "hostName": "h1"}]
+        counts, log = self.run_deletions(computers, graphql_error_uuids={"u1"})
+        self.assertEqual(counts, (0, 1))
+        self.assertIn("Failed to delete serial AAA", log)
+        self.assertNotIn("Deleted serial AAA", log)
 
 
 if __name__ == "__main__":
