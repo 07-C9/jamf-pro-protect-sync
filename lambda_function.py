@@ -253,10 +253,11 @@ def find_computers_to_delete(pro_serials: Set[str], protect_computers: Dict[str,
 def delete_computers_from_protect(
     protect_instance: str,
     access_token: str,
-    computers_to_delete: List[Dict]
+    computers_to_delete: List[Dict],
+    api_call=make_protect_api_call
 ) -> Tuple[int, int]:
     """
-    Delete computers from Jamf Protect
+    Delete computers from Jamf Protect, logging every serial (never hostnames) for auditing
     Returns tuple of (success_count, failure_count)
     """
     success_count = 0
@@ -267,23 +268,19 @@ def delete_computers_from_protect(
     for idx, computer in enumerate(computers_to_delete, 1):
         try:
             variables = {"uuid": computer["uuid"]}
-            resp = make_protect_api_call(
+            resp = api_call(
                 protect_instance,
                 access_token,
                 DELETE_COMPUTER_MUTATION,
                 variables
             )
-            hostname = resp['data']['deleteComputer']['hostName']
-
-            if idx <= 10 or DIAGNOSTIC_MODE:
-                print(f"[DELETE] {idx}/{len(computers_to_delete)} - Deleted: {hostname} (Serial: {computer['serial']})")
-            elif idx % 50 == 0:
-                print(f"[DELETE] Progress: {idx}/{len(computers_to_delete)} deleted...")
-
+            # A refused delete returns HTTP 200 with errors and no deleteComputer result
+            resp['data']['deleteComputer']['hostName']
+            print(f"[DELETE] {idx}/{len(computers_to_delete)} - Deleted serial {computer['serial']}")
             success_count += 1
 
         except Exception as e:
-            print(f"[ERROR] Failed to delete {computer.get('hostName', 'Unknown')}: {e}")
+            print(f"[ERROR] Failed to delete serial {computer.get('serial', 'Unknown')}: {e}")
             failure_count += 1
 
     return success_count, failure_count
